@@ -274,6 +274,9 @@ def _flatten_and(expression):
     else:
         return [expression]
 
+def _atoms_jsonable(atoms):
+    return [{"predicate": p, "args": list(a)} for (p, a) in sorted(atoms)]
+
 def literal_to_atom(literal):
     if not isinstance(literal, list) or not literal:
         raise ValueError(f"Bad literal: {literal}")
@@ -359,6 +362,17 @@ def simulate(domain, problem, plan, *, trace=True, stop_on_invalid=True):
     if domain.name != problem.domain_name:
         raise ValueError(f"Domain mismatch: domain '{domain.name}' != problem's domain '{problem.domain_name}'")
 
+    info = {
+        "success": None,
+        "stopped_step": None,
+        "total_steps": len(plan),
+        "final_state": None,
+        'goal_state': None,
+        "error": None
+    }
+
+    goal_atoms = [literal_to_atom(goal)[1] for goal in _flatten_and(problem.goals)]
+
     state = set(problem.init)
     if trace:
         print(f"Initial state ({len(state)} facts):")
@@ -366,46 +380,65 @@ def simulate(domain, problem, plan, *, trace=True, stop_on_invalid=True):
             print(f"  ({predicate} {' '.join(args)})")
         print()
     
-    for t, (action_name, args) in enumerate(plan, start=1):
-        if action_name not in domain.actions:
-            raise ValueError(f"Unknown action '{action_name}' at step {t}")
-        action = domain.actions[action_name]
-        if len(args) != len(action.params):
-            raise ValueError(f"Arity mismatch at step {t} for '{action_name}': "
-                             f"expected {len(action.params)}, got {len(args)}")
-        
-        binding = {var: const for (var, _), const in zip(action.params, args)}
-        type_check_binding(action, problem.objects, binding)
+    t = 0
+    try:
+        for t, (action_name, args) in enumerate(plan, start=1):
+            if action_name not in domain.actions:
+                raise ValueError(f"Unknown action '{action_name}' at step {t}")
+            action = domain.actions[action_name]
+            if len(args) != len(action.params):
+                raise ValueError(f"Arity mismatch at step {t} for '{action_name}': "
+                                f"expected {len(action.params)}, got {len(args)}")
+            
+            binding = {var: const for (var, _), const in zip(action.params, args)}
+            type_check_binding(action, problem.objects, binding)
 
-        grounded_preconditions = substitute(action.preconditions, binding)
-        grounded_effects = substitute(action.effects, binding)
+            grounded_preconditions = substitute(action.preconditions, binding)
+            grounded_effects = substitute(action.effects, binding)
 
-        ok = holds(state, grounded_preconditions)
+            ok = holds(state, grounded_preconditions)
 
+            if trace:
+                print(f"Step {t}: ({action_name} {' '.join(args)})")
+                print(f"  Precondition: {'OK' if ok else 'FAILED'}")
+            if not ok and stop_on_invalid:
+                raise RuntimeError(f"Precondition failed at step {t}: ({action_name} {' '.join(args)})")
+
+            new_state, adds, dels = apply_effects(state, grounded_effects)
+            if trace:
+                if adds:
+                    print(f"  Add: " + ", ".join([f"({p} {' '.join(a)})" for p, a in sorted(adds)]))
+                if dels:
+                    print(f"  Del: " + ", ".join([f"({p} {' '.join(a)})" for p, a in sorted(dels)]))
+            state = new_state
+            if trace:
+                print()
+
+        goal_ok = holds(state, problem.goals)
         if trace:
-            print(f"Step {t}: ({action_name} {' '.join(args)})")
-            print(f"  Precondition: {'OK' if ok else 'FAILED'}")
-        if not ok and stop_on_invalid:
-            raise RuntimeError(f"Precondition failed at step {t}: ({action_name} {' '.join(args)})")
-
-        new_state, adds, dels = apply_effects(state, grounded_effects)
-        if trace:
-            if adds:
-                print(f"  Add: " + ", ".join([f"({p} {' '.join(a)})" for p, a in sorted(adds)]))
-            if dels:
-                print(f"  Del: " + ", ".join([f"({p} {' '.join(a)})" for p, a in sorted(dels)]))
-        state = new_state
-        if trace:
+            print(f"Final state: ")
+            for p, a in sorted(state):
+                print(f"  ({p} {' '.join(a)})")
             print()
+            print(f"Goal satisfied: {goal_ok}")
 
-    goal_ok = holds(state, problem.goals)
-    if trace:
-        print(f"Final state: ")
-        for p, a in sorted(state):
-            print(f"  ({p} {' '.join(a)})")
-        print()
-        print(f"Goal satisfied: {goal_ok}")
-    return state, goal_ok 
+        info.update({
+            'success': goal_ok,
+            'stopped_step': len(plan),
+            'final_state': _atoms_jsonable(state),
+            'goal_state': _atoms_jsonable(goal_atoms),
+        })
+
+    except Exception as e:
+        info.update({
+            'success': False,
+            'stopped_step': t if 't' in locals() else None,
+            'final_state': _atoms_jsonable(state),
+            'goal_state': _atoms_jsonable(goal_atoms),
+            'error': str(e)
+        })
+
+    return info
 
 # test
 
@@ -435,7 +468,8 @@ def run_test():
     domain = parse_domain(dom_txt)
     problem = parse_problem(prob_txt)
     plan = parse_plan(plan_txt)
-    _, ok = simulate(domain, problem, plan, trace=True)
+    info = simulate(domain, problem, plan, trace=True)
+    ok = info['success']
     return 0 if ok else 1
 
 # CLI
