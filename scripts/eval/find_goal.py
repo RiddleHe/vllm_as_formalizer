@@ -79,20 +79,22 @@ def parse_objects_typed_list(seq):
     buffer = []
     i = 0
     while i < len(seq):
-        if seq[i] == '-':
+        token = seq[i]
+        if token == '-':
             if not buffer:
                 raise ValueError("Found '-' without a collected object name.")
             i += 1
             if i >= len(seq):
                 raise ValueError("Expected type after '-'.")
 
-            type_name = seq[i]
+            parent = seq[i]
             i += 1
-            for name in buffer:
-                out[name] = type_name
+            for t in buffer:
+                out[t] = parent
             buffer = []
+
         else:
-            buffer.append(seq[i])
+            buffer.append(token)
             i += 1
     
     for name in buffer:
@@ -118,6 +120,7 @@ class Domain:
     name: str
     predicates: Dict[str, List[Tuple[str, str]]]
     actions: Dict[str, Action]
+    type_parent: Dict[str, str]
 
 @dataclass
 class Problem:
@@ -136,6 +139,18 @@ def _find_block(forms, head):
                 return f
     return None
 
+def is_subtype(type_parent, child, parent):
+    if parent == "object":
+        return True
+    t = child
+    while True:
+        if t == parent:
+            return True
+        if t not in type_parent:
+            return False
+        t = type_parent[t]
+    return False
+
 def parse_domain(text):
     forms = parse_s_expressions(text)
     if not forms or not isinstance(forms[0], list) or not forms[0] or forms[0][0] != 'define':
@@ -149,11 +164,22 @@ def parse_domain(text):
 
     predicates = {}
     actions = {}
+    type_parent = {}
 
     for block in define:
         if not (isinstance(block, list) and block):
             continue
         tag = block[0]
+
+        if tag == ":types":
+            flat = []
+            for item in block[1:]:
+                if isinstance(item, list):
+                    flat.extend(item)
+                else:
+                    flat.append(item)
+            type_parent.update(parse_objects_typed_list(flat))
+
         if tag == ":predicates":
             for predicate_def in block[1:]:
                 if not (isinstance(predicate_def, list) and predicate_def):
@@ -162,7 +188,7 @@ def parse_domain(text):
                 params = parse_variable_typed_list(predicate_def[1:])
                 predicates[pred_name] = params
 
-        elif tag == ":action":
+        if tag == ":action":
             name = block[1] if len(block) > 1 and isinstance(block[1], str) else None
             if not name:
                 raise ValueError("Action missing name.")
@@ -199,7 +225,7 @@ def parse_domain(text):
 
             actions[name] = Action(name=name, params=params_list, preconditions=preconditions, effects=effects)
 
-    return Domain(name=dom_name, predicates=predicates, actions=actions)
+    return Domain(name=dom_name, predicates=predicates, actions=actions, type_parent=type_parent)
 
 def _parse_init_facts(ast_list):
     facts = set()
@@ -277,6 +303,14 @@ def _flatten_and(expression):
 def _atoms_jsonable(atoms):
     return [{"predicate": p, "args": list(a)} for (p, a) in sorted(atoms)]
 
+def _literals_jsonable(expressions):
+    out = []
+    for literal in expressions:
+        is_neg, atom = literal_to_atom(literal)
+        predicate, args = atom
+        out.append({"predicate": predicate, "args": list(args), "negated": is_neg})
+    return out
+
 def literal_to_atom(literal):
     if not isinstance(literal, list) or not literal:
         raise ValueError(f"Bad literal: {literal}")
@@ -295,37 +329,89 @@ def literal_to_atom(literal):
         return False, (predicate, args)
 
 def holds(state, condition):
-    """Currently only check conditions with connectives 'and' and 'not'"""
-    if isinstance(condition, list) and condition:
-        head = condition[0]
-        if head == "and":
-            return all(holds(state, x) for x in condition[1:])
-        
-        if head == "not":
-            if len(condition) != 2:
-                raise ValueError(f"Bad (not ...) condition: {condition}")
-            _, atom = literal_to_atom(condition)
-            return atom not in state
-
-        else:
-            _, atom = literal_to_atom(condition)
-            return atom in state
-
-    else:
+    if not (isinstance(condition, list) and condition):
         raise ValueError(f"Unexpected condition form: {condition}")
-
-def apply_effects(state, effects):
-    adds = set()
-    dels = set()
-    literals = _flatten_and(effects)
-
-    for literal in literals:
-        is_neg, atom = literal_to_atom(literal)
-        if is_neg:
-            dels.add(atom)
-        else:
-            adds.add(atom)
     
+    head = condition[0]
+    if head == "and":
+        return all(holds(state, x) for x in condition[1:])
+
+    if head == "not":
+        if len(condition) != 2:
+            raise ValueError(f"Bad (not ...) condition: {condition}")
+        return not holds(state, condition[1])
+    
+    if head == "=":
+        if len(condition) != 3:
+            raise ValueError(f"Bad (= x y) condition: {condition}")
+        x, y = condition[1], condition[2]
+        return str(x) == str(y)
+
+    _, atom = literal_to_atom(condition)
+    return atom in state
+
+def _collect_add_del_for_effect(state, effects, *, objects=None, domain=None):
+    adds, dels = set(), set()
+    if not (isinstance(effects, list) and effects):
+        return adds, dels
+
+    head = effects[0]
+    if head == "and":
+        for sub in effects[1:]:
+            a, d = _collect_add_del_for_effect(state, sub, objects=objects, domain=domain)
+            adds |= a
+            dels |= d
+        return adds, dels
+    
+    if head == "when":
+        if len(effects) != 3:
+            raise ValueError(f"Bad (when cond effect) effects: {effects}")
+        cond, body = effects[1], effects[2]
+        if holds(state, cond):
+            a, d = _collect_add_del_for_effect(state, body, objects=objects, domain=domain)
+            adds |= a
+            dels |= d
+        return adds, dels
+
+    if head == "forall":
+        if len(effects) != 3:
+            raise ValueError(f"Bad (forall (vars) effect) effects: {effects}")
+        varlist, body = effects[1], effects[2]
+        if not isinstance(varlist, list):
+            raise ValueError(f"Quantified var list must be a list: {varlist}")
+        vars_typed = parse_variable_typed_list(varlist)
+
+        obj_items = list(objects.items()) if objects else []
+
+        def backtrack(i, theta):
+            nonlocal adds, dels # avoid UnboundLocalError
+            if i == len(vars_typed):
+                grounded = substitute(body, theta)
+                a, d = _collect_add_del_for_effect(state, grounded, objects=objects, domain=domain)
+                adds |= a
+                dels |= d
+                return
+            var, need_type = vars_typed[i]
+            for obj_name, obj_type in obj_items:
+                ok = (need_type == 'object') or (
+                    domain is not None and is_subtype(domain.type_parent, obj_type, need_type)
+                ) or (domain is None and obj_type == need_type)
+                if ok:
+                    theta2 = dict(theta)
+                    theta2[var] = obj_name
+                    backtrack(i + 1, theta2)
+        backtrack(0, {})
+        return adds, dels
+
+    is_neg, atom = literal_to_atom(effects)
+    if is_neg:
+        dels.add(atom)
+    else:
+        adds.add(atom)
+    return adds, dels
+
+def apply_effects(state, effects, *, objects=None, domain=None):
+    adds, dels = _collect_add_del_for_effect(state, effects, objects=objects, domain=domain)
     new_state = (state - dels) | adds
     return new_state, adds, dels
 
@@ -347,7 +433,7 @@ def parse_plan(text):
 
 # simulation driver
 
-def type_check_binding(action, objects, binding):
+def type_check_binding(action, objects, binding, *, domain=None):
     for var, type_name in action.params:
         const = binding.get(var)
         if const is None:
@@ -355,8 +441,11 @@ def type_check_binding(action, objects, binding):
         if const not in objects:
             raise ValueError(f"Unknown object '{const}' for var {var} in action {action.name}")
         obj_type = objects[const]
-        if type_name != "object" and type_name != obj_type:
-            raise ValueError(f"Type mismatch for {var}: expected {type_name}, got {obj_type} (object {const})")
+        if type_name != "object":
+            if obj_type == type_name:
+                continue
+            if domain is None or not is_subtype(domain.type_parent, obj_type, type_name):
+                raise ValueError(f"Type mismatch for {var}: expected {type_name}, got {obj_type} (object {const})")
 
 def simulate(domain, problem, plan, *, trace=True, stop_on_invalid=True):
     if domain.name != problem.domain_name:
@@ -371,7 +460,7 @@ def simulate(domain, problem, plan, *, trace=True, stop_on_invalid=True):
         "error": None
     }
 
-    goal_atoms = [literal_to_atom(goal)[1] for goal in _flatten_and(problem.goals)]
+    goal_lits = _flatten_and(problem.goals)
 
     state = set(problem.init)
     if trace:
@@ -391,7 +480,7 @@ def simulate(domain, problem, plan, *, trace=True, stop_on_invalid=True):
                                 f"expected {len(action.params)}, got {len(args)}")
             
             binding = {var: const for (var, _), const in zip(action.params, args)}
-            type_check_binding(action, problem.objects, binding)
+            type_check_binding(action, problem.objects, binding, domain=domain)
 
             grounded_preconditions = substitute(action.preconditions, binding)
             grounded_effects = substitute(action.effects, binding)
@@ -404,7 +493,7 @@ def simulate(domain, problem, plan, *, trace=True, stop_on_invalid=True):
             if not ok and stop_on_invalid:
                 raise RuntimeError(f"Precondition failed at step {t}: ({action_name} {' '.join(args)})")
 
-            new_state, adds, dels = apply_effects(state, grounded_effects)
+            new_state, adds, dels = apply_effects(state, grounded_effects, objects=problem.objects, domain=domain)
             if trace:
                 if adds:
                     print(f"  Add: " + ", ".join([f"({p} {' '.join(a)})" for p, a in sorted(adds)]))
@@ -426,7 +515,7 @@ def simulate(domain, problem, plan, *, trace=True, stop_on_invalid=True):
             'success': goal_ok,
             'stopped_step': len(plan),
             'final_state': _atoms_jsonable(state),
-            'goal_state': _atoms_jsonable(goal_atoms),
+            'goal_state': _literals_jsonable(goal_lits),
         })
 
     except Exception as e:
@@ -434,9 +523,12 @@ def simulate(domain, problem, plan, *, trace=True, stop_on_invalid=True):
             'success': False,
             'stopped_step': t if 't' in locals() else None,
             'final_state': _atoms_jsonable(state),
-            'goal_state': _atoms_jsonable(goal_atoms),
+            'goal_state': _literals_jsonable(goal_lits),
             'error': str(e)
         })
+
+    if info.get('error'):
+        print(f'Error: {info["error"]}', file=sys.stderr) # log silent errors that are caught
 
     return info
 
