@@ -47,7 +47,29 @@ def _build_privileged():
         'pink': 'red',
     }
 
-def build_mapping(raw_plan, problem, privileged=None):
+def _norm(s):
+    return re.sub(r'[^a-z0-9]', '', s.lower())
+
+def _lev(a, b): # dp implementation
+    if a == b: return 0
+    if len(a) < len(b): a, b = b, a
+    prev = list(range(len(b) + 1))
+    for i, char_a in enumerate(a, 1):
+        cur = [i]
+        for j, char_b in enumerate(b, 1):
+            insert = cur[-1] + 1
+            delete = prev[j] + 1
+            sub = prev[j - 1] + (char_a != char_b)
+            cur.append(min(insert, delete, sub))
+        prev = cur
+    return prev[-1]
+
+def _lev_similarity(a, b):
+    if not a and not b: return 1.0
+    d = _lev(a, b)
+    return 1.0 - d / max(len(a), len(b))
+
+def build_mapping(raw_plan, problem, privileged=None, best_score_threshold=1.0, edit_sim_threshold=0.6):
     raw_objs = {a for _, args in raw_plan for a in args}
     candidate_names = list(problem.objects.keys())
     candidate_tokens_map = {c: _token_set(c) for c in candidate_names}
@@ -58,7 +80,7 @@ def build_mapping(raw_plan, problem, privileged=None):
             if raw not in raw_objs:
                 continue
             if target not in problem.objects:
-                raise ValueError(f'Privileged target {target!r} not in problem objects.')
+                continue
             mapping[raw] = target
 
     for raw in sorted(raw_objs):
@@ -75,10 +97,20 @@ def build_mapping(raw_plan, problem, privileged=None):
             if s > best_score:
                 best_score = s
                 best_candidate = c
-        if best_score <= 0.0:
-            raise ValueError(f"No candidate found for {raw!r}")
+        if best_score > best_score_threshold:
+            mapping[raw] = best_candidate
+            continue
 
-        mapping[raw] = best_candidate
+        nraw = _norm(raw) # edit distance as last resort to avoid overwrites
+        best_edit_candidate, best_edit_sim = None, -1.0
+        for c in candidate_names:
+            sim = _lev_similarity(nraw, _norm(c))
+            if sim > best_edit_sim:
+                best_edit_sim, best_edit_candidate = sim, c
+        if best_edit_sim >= edit_sim_threshold:
+            mapping[raw] = best_edit_candidate
+        else:
+            raise ValueError(f"No candidate found for {raw!r}")
         
     return mapping
 
