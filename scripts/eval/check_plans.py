@@ -10,12 +10,22 @@ from find_goal import (
     simulate,
 )
 
+from openai import OpenAI
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
 def open_file(path):
     with open(path, "r") as f:
         return f.read()
 
 def translate_plan(raw_plan, mapping):
-    return [(name, [mapping[arg] for arg in args]) for name, args in raw_plan]
+    out = []
+    for name, args in raw_plan:
+        missing = [a for a in args if a not in mapping]
+        if missing:
+            # print(f"[SKIP] unmapped args {missing} in action: {name}({', '.join(args)})")
+            continue
+        out.append((name, [mapping[a] for a in args]))
+    return out
 
 def _token_set(name):
     s = re.sub(r'([a-z])([A-Z])', r'\1 \2', name)
@@ -45,6 +55,7 @@ def _build_privileged():
         'robo': 'robot',
         'peach': 'orange',
         'pink': 'red',
+        'robot': 'agent1',
     }
 
 def _norm(s):
@@ -69,7 +80,52 @@ def _lev_similarity(a, b):
     d = _lev(a, b)
     return 1.0 - d / max(len(a), len(b))
 
-def build_mapping(raw_plan, problem, privileged=None, best_score_threshold=1.0, edit_sim_threshold=0.6):
+def suggest_mapping_with_llm(targets, leftovers):
+    if not leftovers:
+        return {}, []
+    prompt = {
+        "role": "user",
+        "content": json.dumps({
+            "instruction": (
+                "Map each leftover object to ONE existing problem object or mark as unmappable. "
+                "Do not invent names. Do not reuse a problem object. "
+                "Each leftover object should be mapped to a single problem object and vice versa. "
+                "If there is no reasonable mapping, mark as unmappable. "
+                "For example, all names beginning with '?' is a variable and should not map to anything. " 
+                "Return only JSON with keys 'mapping' and 'unmappable'."
+            ),
+            "unmapped_raw_tokens": leftovers,
+            "problem_objects": targets,
+            "example": {
+                "input": {
+                    "unmapped_raw_tokens": ["robo-arm", "peach"],
+                    "problem_objects": ["agent1", "orange"],
+                },
+                "output": {
+                    "mapping": {"robo-arm": "agent1", "peach": "orange"},
+                    "unmappable": [],
+                }
+            }
+        }, ensure_ascii=False)
+    }
+    resp = client.chat.completions.create(
+        model="gpt-4.1-mini-2025-04-14",
+        messages=[prompt],
+        temperature=0.2,
+        max_tokens=256,
+        response_format={"type": "json_object"},
+    )
+    text = resp.choices[0].message.content
+    try:
+        data = json.loads(text)
+    except Exception:
+        start, end = text.find("{"), text.rfind("}")
+        data = json.loads(text[start:end+1]) if start != -1 and end != -1 else {}
+    mapping = {k: v for k, v in data.get("mapping", {}).items() if v in set(targets)}
+    unmappable = data.get("unmappable", [])
+    return mapping, unmappable
+
+def build_mapping(raw_plan, problem, privileged=None, best_score_threshold=1.0, edit_sim_threshold=0.6, allow_unmapped=False):
     raw_objs = {a for _, args in raw_plan for a in args}
     candidate_names = list(problem.objects.keys())
     candidate_tokens_map = {c: _token_set(c) for c in candidate_names}
@@ -109,8 +165,22 @@ def build_mapping(raw_plan, problem, privileged=None, best_score_threshold=1.0, 
                 best_edit_sim, best_edit_candidate = sim, c
         if best_edit_sim >= edit_sim_threshold:
             mapping[raw] = best_edit_candidate
-        else:
-            raise ValueError(f"No candidate found for {raw!r}")
+    
+    leftovers = sorted([raw for raw in raw_objs if raw not in mapping])
+    if leftovers:
+        targets = [o for o in problem.objects.keys() if o not in set(mapping.values())]
+        llm_map, llm_unmappable = suggest_mapping_with_llm(targets, leftovers)
+        used_targets = set(mapping.values())
+        for k, v in llm_map.items():
+            if k in leftovers and k not in mapping and v not in used_targets: 
+                mapping[k] = v
+                used_targets.add(v)
+        leftovers = [raw for raw in leftovers if raw not in mapping]
+        if leftovers:
+            if allow_unmapped:
+                print(f"[WARN] no mapping for {leftovers!r}")
+            else:
+                raise ValueError(f"No candidate for {leftovers!r}")
         
     return mapping
 
@@ -154,7 +224,7 @@ def iter_dir(result_dir, data_dir):
         planned_steps.append(len(raw_plan))
 
         try:
-            mapping = build_mapping(raw_plan, problem, privileged=_build_privileged())
+            mapping = build_mapping(raw_plan, problem, privileged=_build_privileged(), allow_unmapped=True)
         except ValueError as e:
             print(f"Task {task_dir_path}: {e}")
             tasks_out.append({
