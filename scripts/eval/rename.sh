@@ -12,7 +12,7 @@ deduce_model() {
     local path_lc="$(lower "$1")"
     if [[ "$path_lc" == *"gpt-4.1"* ]]; then
         echo "gpt-4.1"
-    elif [[ "$path_lc" == *"qwenvl"* ]]; then
+    elif [[ "$path_lc" == *"qwen"* ]]; then
         echo "qwenvl"
     else
         echo "unknown"
@@ -47,10 +47,11 @@ deduce_pipeline() {
     fi
 }
 
+dataset="${prefix%_}"
+
 while IFS= read -r -d '' file; do
   bn="$(basename "$file")"
   dirn="$(dirname "$file")"
-  bn_lc="$(lower "$bn")"
 
   if [[ "$bn" != "${prefix}"* ]]; then
     continue
@@ -60,13 +61,18 @@ while IFS= read -r -d '' file; do
   n_run="$(deduce_run "$bn")"
   pipeline="$(deduce_pipeline "$bn")"
 
-  new_name="${model_name}-blocksworld-small-${pipeline}-${n_run}.json"
+  new_name="${model_name}-${dataset}-small-${pipeline}-${n_run}.json"
   target_path="${dirn}/${new_name}"
 
   echo "Renaming:"
   echo "  $bn"
   echo "    -> $(basename "$target_path")"
-  mv -i -- "$file" "$target_path"
+  
+  if [[ -e "$target_path" ]]; then
+    echo "  [skip] target exists: $target_path"
+  else
+    mv -- "$file" "$target_path"
+  fi
 
 done < <(find "$data_dir" -maxdepth 1 -type f -name '*.json' -print0)
 
