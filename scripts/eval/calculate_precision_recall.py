@@ -1,4 +1,4 @@
-import os, re, json, argparse
+import os, json, argparse
 
 from find_goal import literal_to_atom, _flatten_and, parse_problem
 
@@ -11,7 +11,7 @@ def mean(xs):
 
 def load_mapping_index(report_path):
     data = json.loads(read_text(report_path))
-    tasks = data.get("tasks", {})
+    tasks = data.get("tasks", [])
     idx = {}
     for t in tasks:
         tid = t.get("task_id")
@@ -62,13 +62,25 @@ def map_atom_set(atoms, mapping):
             unmapped += 1
     return out, unmapped
 
-def map_typed_objects(pred_objs_dict, mapping):
-    out, unmapped = set(), 0
-    for pred_name, pred_type in pred_objs_dict.items():
-        if pred_name in mapping:
-            out.add((mapping[pred_name], pred_type))
-        else:
-            unmapped += 1
+def map_object_set(objs, mapping, *, typed=False, exclude_unmapped=True):
+    out = set()
+    unmapped = 0
+    if typed:
+        for name, typ in objs:
+            if name in mapping:
+                out.add((mapping[name], typ))
+            else:
+                unmapped += 1
+                if not exclude_unmapped:
+                    out.add((name, typ))
+    else:
+        for name in objs:
+            if name in mapping:
+                out.add(mapping[name])
+            else:
+                unmapped += 1
+                if not exclude_unmapped:
+                    out.add(name)
     return out, unmapped
 
 # scoring
@@ -100,6 +112,13 @@ def _pick_problem_file(base_dir, task_id):
         return None, f"Missing problem file in {task_dir}"
     return problem_files[-1], None # return last attempt
 
+def _zero_section(gt_set, pred_set):
+    return {
+        "sizes": {"gt": len(gt_set), "pred_mapped": 0},
+        "true_positives": 0, "false_positives": len(pred_set), "false_negatives": len(gt_set),
+        "precision": 0.0, "recall": 0.0,
+    }
+
 # per task eval
 def eval_task(task_id, result_dir, data_dir, mapping):
     gt_path, gt_err = _pick_problem_file(data_dir, task_id)
@@ -110,31 +129,73 @@ def eval_task(task_id, result_dir, data_dir, mapping):
     if not os.path.exists(pred_path):
         return {"task_id": task_id, "problem_eval": {"error": f"Predicted: {pred_err}"}}
 
-    # TODO: no mapping means precision/recall is 0, not a bug
-    if mapping is None:
-        return {"task_id": task_id, "problem_eval": {"error": "Missing mapping for this task"}}
-
     try:
         gt_prob = parse_problem(read_text(gt_path))
         pred_prob = parse_problem(read_text(pred_path))
     except Exception as e:
         return {"task_id": task_id, "problem_eval": {"error": f"parse_problem failed: {e}"}}
     
-    gt_objs = norm_objects(gt_prob, typed=True)
+    gt_objs = norm_objects(gt_prob, typed=False)
     gt_init = norm_init(gt_prob)
     gt_goal = norm_goal(gt_prob)
 
-    pred_objs_raw = norm_objects(pred_prob, typed=typed_objects)
+    pred_objs_raw = norm_objects(pred_prob, typed=False)
     pred_init_raw = norm_init(pred_prob)
     pred_goal_raw = norm_goal(pred_prob)
 
-    pred_objs, unmapped_objs = map_object_names(pred_objs_raw, mapping, exclude_unmapped=True)
+    if mapping is None: # have lots of fp in original generation, so p/r are 0
+        sec_objects = _zero_section(gt_objs, pred_objs_raw)
+        sec_init = _zero_section(gt_init, pred_init_raw)
+        sec_goal = _zero_section(gt_goal, pred_goal_raw)
+        return {
+            "task_id": task_id,
+            "problem_eval": {
+                "config": {
+                    "gt_problem_path": os.path.abspath(gt_path),
+                    "pred_problem_path": os.path.abspath(pred_path),
+                },
+                "sections": {
+                    "objects": sec_objects, 
+                    "init": sec_init, 
+                    "goal": sec_goal, 
+                    "type": {"objects_checked": 0, "mismatches": 0, "agreement": 0.0}
+                },
+                "overall": {
+                    "macro": {"precision": 0.0, "recall": 0.0}, 
+                    "micro": {
+                        "true_positives": 0, 
+                        "false_positives": sec_objects["false_positives"] + sec_init["false_positives"] + sec_goal["false_positives"], 
+                        "false_negatives": sec_objects["false_negatives"] + sec_init["false_negatives"] + sec_goal["false_negatives"], 
+                        "precision": 0.0, "recall": 0.0
+                    }
+                },
+                "unmapped": {"object_count": len(pred_objs_raw), "init_count": len(pred_init_raw), "goal_count": len(pred_goal_raw)}
+            }
+        }
+
+    pred_objs, unmapped_objs = map_object_set(pred_objs_raw, mapping, typed=False, exclude_unmapped=True)
     pred_init, unmapped_init = map_atom_set(pred_init_raw, mapping)
     pred_goal, unmapped_goal = map_atom_set(pred_goal_raw, mapping)
 
     sec_objects = score_sets(gt_objs, pred_objs)
     sec_init = score_sets(gt_init, pred_init)
     sec_goal = score_sets(gt_goal, pred_goal)
+
+    type_checked, type_mismatches = 0, 0
+    for pred_name, pred_type in pred_prob.objects.items():
+        if pred_name in mapping:
+            gt_name = mapping[pred_name]
+            gt_type = gt_prob.objects.get(gt_name)
+            if gt_type is not None:
+                type_checked += 1
+                if gt_type != pred_type:
+                    type_mismatches += 1
+    type_agreement = (1.0 if type_checked == 0 else (type_checked - type_mismatches) / type_checked)
+    sec_type = {
+        "objects_checked": type_checked,
+        "mismatches": type_mismatches,
+        "agreement": type_agreement,
+    }
 
     macro_precision = mean([sec_objects['precision'], sec_init['precision'], sec_goal['precision']])
     macro_recall = mean([sec_objects['recall'], sec_init['recall'], sec_goal['recall']])
@@ -152,12 +213,12 @@ def eval_task(task_id, result_dir, data_dir, mapping):
             "config": {
                 "gt_problem_path": os.path.abspath(gt_path),
                 "pred_problem_path": os.path.abspath(pred_path),
-                "typed_objects": bool(typed_objects),
             },
             "sections": {
                 "objects": sec_objects,
                 "init": sec_init,
                 "goal": sec_goal,
+                "type": sec_type,
             },
             "overall": {
                 "macro": {"precision": macro_precision, "recall": macro_recall},
@@ -181,11 +242,18 @@ def build_summary(task_results):
     macro_ps = {s: [] for s in sections}
     macro_rs = {s: [] for s in sections}
 
+    types_checked_total = 0
+    types_mismatches_total = 0
+    types_agreements = []
+
     counts = {
         "task_total": len(task_results),
         "task_scored": 0,
         "task_missing_pred_problem": 0,
+        "task_missing_gt_problem": 0,
         "task_with_parse_error": 0,
+        "task_missing_mapping": 0,
+        "task_other_error": 0,
     }
 
     for task_result in task_results:
@@ -193,11 +261,16 @@ def build_summary(task_results):
         if "error" in problem_eval:
             msg = str(problem_eval["error"]).lower()
 
-            # TODO: double check have covered all error types
-            if "missing predicted" in msg:
+            if "predicted:" in msg:
                 counts["task_missing_pred_problem"] += 1
-            else:
+            elif "gt:" in msg:
+                counts["task_missing_gt_problem"] += 1
+            elif "parse_problem failed" in msg:
                 counts["task_with_parse_error"] += 1
+            elif "missing mapping" in msg:
+                counts["task_missing_mapping"] += 1
+            else:
+                counts["task_other_error"] += 1
             continue
 
         counts["task_scored"] += 1
@@ -208,6 +281,12 @@ def build_summary(task_results):
             fn_s[s] += sec["false_negatives"]
             macro_ps[s].append(sec["precision"])
             macro_rs[s].append(sec["recall"])
+
+        type_sec = problem_eval["sections"]["type"]
+        types_checked_total += type_sec["objects_checked"]
+        types_mismatches_total += type_sec["mismatches"]
+        if type_sec["objects_checked"] > 0:
+            types_agreements.append(type_sec["agreement"])
 
     by_section = {}
     for s in sections:
@@ -230,12 +309,21 @@ def build_summary(task_results):
     overall_macro_p = mean([by_section[s]['macro_precision'] for s in sections])
     overall_macro_r = mean([by_section[s]['macro_recall'] for s in sections])
 
+    types_micro_agreement = (1.0 if types_checked_total == 0 else (types_checked_total - types_mismatches_total) / types_checked_total)
+    types_macro_agreement = mean(types_agreements)
+
     return {
         "by_section": by_section,
         "overall": {
             "tp": tp_all, "fp": fp_all, "fn": fn_all,
             "macro_precision": overall_macro_p, "macro_recall": overall_macro_r,
             "micro_precision": overall_micro_p, "micro_recall": overall_micro_r,
+        },
+        "types": {
+            "objects_checked": types_checked_total,
+            "mismatches": types_mismatches_total,
+            "macro_agreement": types_macro_agreement,
+            "micro_agreement": types_micro_agreement,
         },
         "counts": counts,
     }
