@@ -9,13 +9,12 @@ def read_text(path):
 def mean(xs):
     return 0.0 if not xs else sum(xs) / len(xs)
 
-def load_mapping_index(report_path):
-    data = json.loads(read_text(report_path))
-    tasks = data.get("tasks", [])
+def load_mapping_index(report_dict):
+    tasks = report_dict.get("tasks", [])
     idx = {}
     for t in tasks:
         tid = t.get("task_id")
-        mapping = t.get(f"mapping", {}) or {}
+        mapping = t.get("mapping", {}) or {}
         if tid is not None: 
             idx[tid] = mapping
     return idx
@@ -328,6 +327,42 @@ def build_summary(task_results):
         "counts": counts,
     }
 
+def _merge_same_key(key, a, b):
+    va, vb = a.get(key), b.get(key)
+    if va is None and vb is None:
+        return None
+    if va == vb:
+        return va
+    return [va, vb]
+
+def merge_reports(check_plan_report, p_r_report):
+    summary = {
+        **check_plan_report.get("summary", {}),
+        **p_r_report.get("summary", {}),
+    }
+    plan_tasks = {task["task_id"]: task for task in check_plan_report.get("tasks", [])}
+    p_r_tasks = {task["task_id"]: task for task in p_r_report.get("tasks", [])}
+    merged_tasks = []
+    all_ids = sorted(set(plan_tasks) | set(p_r_tasks))
+    for tid in all_ids:
+        merged_task = {"task_id": tid}
+        if tid in plan_tasks:
+            merged_task.update(plan_tasks[tid])
+        if tid in p_r_tasks:
+            for k, v in p_r_tasks[tid].items():
+                if k != "task_id":
+                    merged_task[k] = v
+        merged_tasks.append(merged_task)
+    
+    merged = {
+        "result_dir": _merge_same_key("result_dir", check_plan_report, p_r_report),
+        "data_dir": _merge_same_key("data_dir", check_plan_report, p_r_report),
+        # drop the mapping report path
+        "summary": summary,
+        "tasks": merged_tasks,
+    }
+    return merged
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("result_dir")
@@ -336,7 +371,8 @@ def main():
     parser.add_argument("output_file")
     args = parser.parse_args()
 
-    mapping_index = load_mapping_index(args.mapping_report_path)
+    mapping_report_dict = json.loads(read_text(args.mapping_report_path))
+    mapping_index = load_mapping_index(mapping_report_dict)
     task_results = []
     for task_id in sorted(os.listdir(args.result_dir)):
         task_path = os.path.join(args.result_dir, task_id)
@@ -353,8 +389,9 @@ def main():
         "tasks": task_results,
     }
 
+    merged_report = merge_reports(mapping_report_dict, report)
     with open(args.output_file, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2, ensure_ascii=False)
+        json.dump(merged_report, f, indent=2, ensure_ascii=False)
 
 if __name__ == "__main__":
     main()
