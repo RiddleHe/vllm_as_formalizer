@@ -9,6 +9,23 @@ RENAME_HELPERS="${5:-./rename.sh}"
 
 source "$RENAME_HELPERS"
 
+dataset_tag() {
+    case "$1" in
+        blocksworld_) echo "blocksworld-small" ;;
+        cooking_) echo "cooking-small" ;;
+        alfred_) echo "alfred" ;;
+        blocksworld-real) echo "blocksworld-real" ;;
+        *) echo "${1%_}" ;;
+    esac
+}
+
+needs_run_tag() {
+    case "$1" in 
+        alfred_|blocksworld-real) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 PREFIXES=("blocksworld_" "cooking_" "alfred_" "blocksworld-real")
 DATA_PATHS=("/local-ssd/mh3897/alfred/blocksworld" "/local-ssd/mh3897/alfred/cooking" "/local-ssd/mh3897/alfred/alfred_137" "/local-ssd/mh3897/alfred/blocksworld-real")
 MODEL_NAMES=("gpt-4.1" "qwen")
@@ -28,7 +45,6 @@ mkdir -p "$OUTPUT_DIR"
 for i in "${!PREFIXES[@]}"; do
     prefix="${PREFIXES[$i]}"
     data_path="${DATA_PATHS[$i]}"
-    dataset="${prefix%_}"
 
     echo "=== Processing prefix '$prefix' with data '$data_path' ==="
 
@@ -47,22 +63,33 @@ for i in "${!PREFIXES[@]}"; do
         done
         [[ "$match" == true ]] || continue
 
+        dataset="$(dataset_tag "$prefix")"
+        use_run=true
+        if ! needs_run_tag "$prefix"; then use_run=false; fi
+
         model_name="$(deduce_model "$dirname")"
         run_tag="$(deduce_run "$dirname")"
         pipeline_tag="$(deduce_pipeline "$dirname")"
-        mapping_json="${MAPPING_DIR}/${model_name}-${dataset}-${pipeline_tag}-${run_tag}.json"
+
+        run_part=""
+        if $use_run; then
+            run_part="-$run_tag"
+        fi
+
+        mapping_json="${MAPPING_DIR}/${model_name}-${dataset}-${pipeline_tag}${run_part}.json"
 
         if [[ ! -f "$mapping_json" ]]; then
             echo "Warning: mapping not found, skipping $dirname"
             continue
         fi
 
-        out_json="${OUTPUT_DIR}/${dirname}.json"
+        out_json="${OUTPUT_DIR}/$(basename "$mapping_json")"
 
         echo "Processing $dirname"
+        echo "  mapping: $mapping_json"
         echo "  -> $out_json"
 
-        python3 "$PY_SCRIPT" "$dir" "$data_path" "$out_json"
+        python3 "$PY_SCRIPT" "$dir" "$data_path" "$mapping_json" "$out_json"
     done
     shopt -u nullglob
 done

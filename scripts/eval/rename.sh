@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
-data_dir="${1:-../../results}"
-prefix="${2:-blocksworld_}"
-
-shopt -s nullglob
 
 lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 
@@ -47,33 +41,41 @@ deduce_pipeline() {
     fi
 }
 
-dataset="${prefix%_}"
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 
-while IFS= read -r -d '' file; do
-  bn="$(basename "$file")"
-  dirn="$(dirname "$file")"
+    set -euo pipefail
 
-  if [[ "$bn" != "${prefix}"* ]]; then
-    continue
-  fi
+    data_dir="${1:-../../results}"
+    prefix="${2:-blocksworld_}"
 
-  model_name="$(deduce_model "$bn")"
-  n_run="$(deduce_run "$bn")"
-  pipeline="$(deduce_pipeline "$bn")"
+    dataset="${prefix%_}"
 
-  new_name="${model_name}-${dataset}-small-${pipeline}-${n_run}.json"
-  target_path="${dirn}/${new_name}"
+    while IFS= read -r -d '' file; do
+    bn="$(basename "$file")"
+    dirn="$(dirname "$file")"
 
-  echo "Renaming:"
-  echo "  $bn"
-  echo "    -> $(basename "$target_path")"
-  
-  if [[ -e "$target_path" ]]; then
-    echo "  [skip] target exists: $target_path"
-  else
-    mv -- "$file" "$target_path"
-  fi
+    if [[ "$bn" != "${prefix}"* ]]; then
+        continue
+    fi
 
-done < <(find "$data_dir" -maxdepth 1 -type f -name '*.json' -print0)
+    model_name="$(deduce_model "$bn")"
+    n_run="$(deduce_run "$bn")"
+    pipeline="$(deduce_pipeline "$bn")"
 
-echo "Done."
+    new_name="${model_name}-${dataset}-small-${pipeline}-${n_run}.json"
+    target_path="${dirn}/${new_name}"
+
+    echo "Renaming:"
+    echo "  $bn"
+    echo "    -> $(basename "$target_path")"
+    
+    if [[ -e "$target_path" ]]; then
+        echo "  [skip] target exists: $target_path"
+    else
+        mv -- "$file" "$target_path"
+    fi
+
+    done < <(find "$data_dir" -maxdepth 1 -type f -name '*.json' -print0)
+
+    echo "Done."
+fi

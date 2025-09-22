@@ -126,7 +126,7 @@ def eval_task(task_id, result_dir, data_dir, mapping):
 
     if gt_err:
         return {"task_id": task_id, "problem_eval": {"error": f"GT: {gt_err}"}}
-    if not os.path.exists(pred_path):
+    if pred_err:
         return {"task_id": task_id, "problem_eval": {"error": f"Predicted: {pred_err}"}}
 
     try:
