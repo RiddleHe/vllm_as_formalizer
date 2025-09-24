@@ -100,6 +100,8 @@ def iterate_run(run_dir, tokenizer, pipeline):
     prompts_cumulative = []
     response_cumulative = []
 
+    n_tasks = 0
+
     for task_dir in tqdm(sorted(os.listdir(run_dir)), desc="Iterating tasks"):
         if not os.path.isdir(os.path.join(run_dir, task_dir)):
             continue
@@ -119,14 +121,22 @@ def iterate_run(run_dir, tokenizer, pipeline):
 
         prompts_cumulative.append(parsed_prompt)
         response_cumulative.append(parsed_response)
+        n_tasks += 1
         
     total_prompt_tok = count_tokens(prompts_cumulative, tokenizer) if prompts_cumulative else 0
     total_response_tok = count_tokens(response_cumulative, tokenizer) if response_cumulative else 0
+
+    if n_tasks == 0 or total_prompt_tok == 0 or total_response_tok == 0:
+        return None
 
     return {
         "prompt_token_count": total_prompt_tok,
         "response_token_count": total_response_tok,
         "total_token_count": total_prompt_tok + total_response_tok,
+        "n_tasks": n_tasks,
+        "prompt_tokens_average": total_prompt_tok / n_tasks,
+        "response_tokens_average": total_response_tok / n_tasks,
+        "total_tokens_average": (total_prompt_tok + total_response_tok) / n_tasks,
     }
 
 def iterate_runs(result_dir):
@@ -144,6 +154,9 @@ def iterate_runs(result_dir):
             continue
 
         result = iterate_run(dir_path, tokenizer, info["pipeline"])
+        if result is None:
+            continue
+
         total_results.append({
             **info,
             **result
