@@ -24,9 +24,7 @@ deduce_run() {
 
 deduce_pipeline() {
     local name_lc="$(lower "$1")"
-    if [[ "$name_lc" == *"direct_pddl"* ]]; then
-        echo "direct-pddl"
-    elif [[ "$name_lc" == *"vila"* ]]; then
+    if [[ "$name_lc" == *"vila"* ]]; then
         echo "direct-plan"
     elif [[ "$name_lc" == *"no_batch"* ]]; then
         echo "scene-graph-multi-step-no-batch"
@@ -36,6 +34,8 @@ deduce_pipeline() {
         echo "scene-graph"
     elif [[ "$name_lc" == *"caption"* ]]; then
         echo "caption"
+    elif [[ "$name_lc" == *"direct_pddl"* ]]; then
+        echo "direct-pddl"
     else
         echo "unknown"
     fi
