@@ -97,9 +97,9 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_dir", type=Path, required=True)
     parser.add_argument("--dataset", type=str, required=True)
-    parser.add_argument("--model_module", type=str, required=True)
+    parser.add_argument("--model_module", type=str, default="pipelines.load_models")
     parser.add_argument("--model", type=str, required=True)
-    parser.add_argument("--pipeline_module", type=str, required=True)
+    parser.add_argument("--pipeline_module", type=str, default="pipelines.load_pipelines")
     parser.add_argument("--pipeline", type=str, required=True)
     return parser.parse_args()
 
