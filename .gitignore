@@ -2,3 +2,4 @@ VAL/
 downward/
 __pycache__/
 results/
+scripts/eval/error_analysis.ipynb
