@@ -1,0 +1,9 @@
+{
+    "actions": [
+        "pick-up (?x - block ?robot - robot)",
+        "put-down (?x - block ?robot - robot)",
+        "stack (?x - block ?y - block ?robot - robot)",
+        "unstack (?x - block ?y - block ?robot - robot)"
+    ],
+    "text": "You can always assume that at least one robot arm is available if not in the image."
+}

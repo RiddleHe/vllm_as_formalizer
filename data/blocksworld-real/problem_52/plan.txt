@@ -1,0 +1,8 @@
+(unstack yellow red robot)
+(put-down yellow robot)
+(unstack red orange robot)
+(put-down red robot)
+(pick-up orange robot)
+(stack orange blue robot)
+(pick-up yellow robot)
+(stack yellow red robot)
